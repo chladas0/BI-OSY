@@ -1,3 +1,6 @@
+sample/vgcore*
+sample/.idea
+
 # Prerequisites
 *.d
 
