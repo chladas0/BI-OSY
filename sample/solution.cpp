@@ -40,155 +40,133 @@
 using namespace std;
 #endif /* __PROGTEST__ */
 
-
 struct CProblemPackWrapper
 {
     shared_ptr<CProblemPack> m_Pack;
-    int m_ProblemId = -1;
-    int m_CompanyId = -1;
+    size_t m_ProblemId, m_CompanyId;
+    size_t m_MinSize, m_CntSize;
     bool m_Suicide = false;
-public:
-    CProblemPackWrapper() = default;
-    CProblemPackWrapper(shared_ptr<CProblemPack> pack, int problemId, int companyId, bool suicide = false)
+
+
+
+    CProblemPackWrapper(shared_ptr<CProblemPack> pack, size_t problemId, size_t companyId, bool suicide = false)
         : m_Pack(std::move(pack)), m_ProblemId(problemId), m_CompanyId(companyId), m_Suicide(suicide)
-    {}
+    {
+        if(pack){
+            m_MinSize = m_Pack->m_ProblemsMin.size(); m_CntSize = m_Pack->m_ProblemsCnt.size();
+        }
+        else
+        {
+            m_MinSize = 0;
+            m_CntSize = 0;
+        }
+    }
+    CProblemPackWrapper() = default;
+
+    bool isSolved() const {return m_MinSize == 0 && m_CntSize == 0;}
 };
+//-------------------------------------------------------------------------------------------------------------------------------------------------------------
+struct ACompanyWrapper
+{
+    explicit ACompanyWrapper(ACompany comp) : company(std::move(comp)) {}
+    ACompanyWrapper(const ACompanyWrapper &comp) : company(comp.company), problems(comp.problems){}
 
-
+    mutex m_CompanyMutex;
+    condition_variable submitNotReady;
+    ACompany company;
+    unordered_map<int, CProblemPackWrapper> problems;
+};
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
 class COptimizer
 {
   public:
-    static bool usingProgtestSolver (){
-      return true;
-    }
-
-    static void checkAlgorithmMin (APolygon p){
-      // dummy implementation if usingProgtestSolver() returns true
-    }
-
-    static void checkAlgorithmCnt (APolygon p){
-      // dummy implementation if usingProgtestSolver() returns true
-    }
+    static bool usingProgtestSolver (){ return true;}
+    static void checkAlgorithmMin (APolygon p){}
+    static void checkAlgorithmCnt (APolygon p){}
 
     void start (int threadCount);
     void stop ();
     void addCompany (ACompany company);
 
-    static void workThread (int threadId, COptimizer * optimizer);
-    static void problemReceiver (int companyId, COptimizer * optimizer);
-    static void problemSubmitter (int companyId, COptimizer * optimizer);
+    void workThread (int threadId);
+    void problemReceiver (int companyId);
+    void problemSubmitter (int companyId);
 
-    class CProgtestSolverWrapper
-    {
-    public:
-        CProgtestSolverWrapper();
-        void addToSolve(CProblemPackWrapper & pack);
-        void solveOneMin(APolygon & polygon);
-        void solveOneCnt(APolygon & polygon);
-    private:
-
-        vector<AProgtestSolver> m_Min;
-        vector<AProgtestSolver> m_Cnt;
-
-        queue<CProblemPackWrapper> toReview;
-
-        int idx_Min = 0;
-        int idx_Cnt = 0;
-
-        mutex m_MtxMinSolvers;
-        mutex m_MtxCntSolvers;
-    };
+    void addToSolve(const CProblemPackWrapper& pack);
+    void solveOneCnt(const APolygon& polygon);
+    void solveOneMin(const APolygon& polygon);
+    void initSolver(){m_MinSolvers.emplace_back(createProgtestMinSolver()),
+                      m_CntSolvers.emplace_back(createProgtestCntSolver());}
 
 private:
-    CProgtestSolverWrapper solver;
-
-    size_t m_LiveWorkers;
-    size_t m_LiveReceivers;
-
-    vector<ACompany> m_Companies;
-
     vector<thread>  m_WorkThreads;
     vector<thread>  m_Receivers;
     vector<thread>  m_Submitters;
 
+    vector<ACompanyWrapper> m_Companies;
+    vector<CProblemPackWrapper> m_toReview;
+
+    size_t m_LiveWorkers;
+    size_t m_LiveReceivers;
+
     queue<CProblemPackWrapper> m_ToSolve;
-    vector<CProblemPackWrapper> m_ToSubmit;
 
     mutex g_MtxToSolve;
-    mutex g_MtxToSubmit;
     mutex g_MtxLiveReceivers;
-
+    mutex g_Solvers;
+    mutex g_ToReview;
 
     condition_variable allReceived;
     condition_variable toSolveEmpty;
     condition_variable toSubmitEmpty;
+
+    // solver stuff
+    size_t cntIdx = 0;
+    size_t minIdx = 0;
+    vector<AProgtestSolver> m_MinSolvers;
+    vector<AProgtestSolver> m_CntSolvers;
 };
+
+
+// Solving -------------------------------------------------------------------------------------------------------------
+void COptimizer::addToSolve(const CProblemPackWrapper& pack)
+{
+    g_ToReview.lock();
+    m_toReview.emplace_back(pack);
+    g_ToReview.unlock();
+
+    for(auto & i : pack.m_Pack->m_ProblemsMin) solveOneMin(i);
+    for(auto & i : pack.m_Pack->m_ProblemsCnt) solveOneCnt(i);
+}
+
+void COptimizer::solveOneCnt(const APolygon& polygon)
+{
+    unique_lock<mutex> ul(g_Solvers);
+    m_CntSolvers[cntIdx]->addPolygon(polygon);
+}
+
+void COptimizer::solveOneMin(const APolygon& polygon)
+{
+    unique_lock<mutex> ul(g_Solvers);
+    m_MinSolvers[minIdx]->addPolygon(polygon);
+}
+
+
+
 // ---------------------------------------------------------------------------------------------------------------------
-COptimizer::CProgtestSolverWrapper::CProgtestSolverWrapper()
-{
-    m_Min.push_back(createProgtestMinSolver());
-    m_Cnt.push_back(createProgtestCntSolver());
-}
-
-void COptimizer::CProgtestSolverWrapper::addToSolve (CProblemPackWrapper & pack)
-{
-    for(auto & i : pack.m_Pack->m_ProblemsCnt)
-        solveOneMin(i);
-
-    for(auto & i : pack.m_Pack->m_ProblemsMin)
-        solveOneCnt(i);
-}
-
-void COptimizer::CProgtestSolverWrapper::solveOneMin (APolygon & polygon)
-{
-    unique_lock<mutex> ul(m_MtxMinSolvers);
-    if(!m_Min[idx_Min]->addPolygon(polygon)){
-        m_Min.push_back(createProgtestMinSolver());
-        idx_Min++;
-        m_Min[idx_Min]->addPolygon(polygon);
-        ul.unlock();
-
-        m_Min[idx_Min-1]->solve();
-    }
-}
-
-void COptimizer::CProgtestSolverWrapper::solveOneCnt (APolygon & polygon)
-{
-    unique_lock<mutex> ul(m_MtxCntSolvers);
-    if(!m_Cnt[idx_Cnt]->addPolygon(polygon))
-    {
-        // Create new solver for other threads
-        m_Cnt.push_back(createProgtestCntSolver());
-        idx_Cnt++;
-        m_Cnt[idx_Cnt]->addPolygon(polygon);
-        ul.unlock();
-
-        // this thread will be solving
-        size_t solved = m_Cnt[idx_Cnt-1]->solve();
-
-        while(!toReview.empty())
-        {
-            auto cur = toReview.front();
-        }
-
-    }
-}
-
-
-void COptimizer::workThread (int threadId, COptimizer * opt)
+void COptimizer::workThread (int threadId)
 {
     printf("Work thread %d started \n", threadId);
 
     while(true)
     {
-        unique_lock<mutex> toSolveLock(opt->g_MtxToSolve);
+        unique_lock<mutex> toSolveLock(g_MtxToSolve);
 
-        while (opt->m_ToSolve.empty())
-            opt->toSolveEmpty.wait(toSolveLock);
+        while (m_ToSolve.empty())
+            toSolveEmpty.wait(toSolveLock);
 
-        auto pack = opt->m_ToSolve.front();
-        opt->m_ToSolve.pop();
+        auto pack = m_ToSolve.front();
+        m_ToSolve.pop();
 
 
         if(pack.m_Suicide){
@@ -196,70 +174,70 @@ void COptimizer::workThread (int threadId, COptimizer * opt)
             break;
         }
 
-        opt->solver.addToSolve(pack);
-
-        // needs to have the 2 flags
-        opt->g_MtxToSubmit.lock();
-        opt->m_ToSubmit.push_back(pack);
-        opt->g_MtxToSubmit.unlock();
-
+        addToSolve(pack);
         printf("Processed\n");
     }
 
     printf("Workthread %d ended\n", threadId);
 }
 
-void COptimizer::problemReceiver (int companyId, COptimizer * opt)
+void COptimizer::problemReceiver (int companyId)
 {
   size_t id = 0;
 
   while(true)
   {
-    auto pack = opt->m_Companies[companyId]->waitForPack();
+    auto pack = m_Companies[companyId].company->waitForPack();
 
     if(pack == nullptr) break;
 
+    CProblemPackWrapper x(pack, id, companyId);
+
     // Emplace the pack to be solved
-    opt->g_MtxToSolve.lock();
+    g_MtxToSolve.lock();
+    m_ToSolve.emplace(x);
+    toSolveEmpty.notify_all();
+    g_MtxToSolve.unlock();
 
-    opt->m_ToSolve.emplace(pack, id, companyId);
-    opt->toSolveEmpty.notify_all();
+    // Add it to the solved problems
+    m_Companies[companyId].m_CompanyMutex.lock();
+    m_Companies[companyId].problems.emplace(id, x);
+    m_Companies[companyId].m_CompanyMutex.unlock();
 
-    opt->g_MtxToSolve.unlock();
     id++;
   }
 
   // update the live receivers
+  g_MtxLiveReceivers.lock();
 
-  opt->g_MtxLiveReceivers.lock();
+  m_LiveReceivers--;
+  if(m_LiveReceivers == 0)
+        allReceived.notify_all();
 
-  opt->m_LiveReceivers--;
-  if(opt->m_LiveReceivers == 0)
-        opt->allReceived.notify_all();
-
-  opt->g_MtxLiveReceivers.unlock();
+  g_MtxLiveReceivers.unlock();
 
   printf("All problems received\n");
 }
 
-void COptimizer::problemSubmitter (int companyId, COptimizer * opt)
+void COptimizer::problemSubmitter (int companyId)
 {
-    // TODO
+
 }
 
 
 void COptimizer::start ( int threadCount )
 {
+    initSolver();
     m_LiveWorkers = threadCount;
     m_LiveReceivers = m_Companies.size();
 
     for(int i = 0; i < (int)m_Companies.size(); i++){
-        m_Receivers.emplace_back(problemReceiver, i, this);
-        m_Submitters.emplace_back(problemSubmitter, i, this);
+        m_Receivers.emplace_back(&COptimizer::problemReceiver, this, i);
+        m_Submitters.emplace_back(&COptimizer::problemSubmitter, this, i);
     }
 
     for (int i = 0; i < threadCount; i++)
-        m_WorkThreads.emplace_back(workThread, i, this);
+        m_WorkThreads.emplace_back(&COptimizer::workThread, this, i);
 }
 
 void COptimizer::stop ()
@@ -298,7 +276,7 @@ int main ()
   COptimizer optimizer;
   ACompanyTest  company = std::make_shared<CCompanyTest> ();
   optimizer . addCompany ( company );
-  optimizer . start ( 100 );
+  optimizer . start ( 5 );
   optimizer . stop  ();
 //  if ( ! company -> allProcessed () )
 //    throw std::logic_error ( "(some) problems were not correctly processsed" );
