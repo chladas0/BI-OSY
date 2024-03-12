@@ -40,6 +40,11 @@
 using namespace std;
 #endif /* __PROGTEST__ */
 
+enum SolverType{
+    MIN, CNT
+};
+
+//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 template<typename T>
 class AtomicQueue
 {
@@ -65,7 +70,9 @@ private:
     queue<T> m_Queue;
     function<bool(queue<T> & q)> m_Pred;
 };
+
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 struct AProblemPackWrapper
 {
     AProblemPack m_Pack;
@@ -75,9 +82,11 @@ struct AProblemPackWrapper
     AProblemPackWrapper(AProblemPack pack, size_t companyId)
         : m_Pack(std::move(pack)), m_CompanyId(companyId), toBeSolved(m_Pack->m_ProblemsMin.size() + m_Pack->m_ProblemsCnt.size()){}
 
-    bool isSolved() const {return toBeSolved == 0;}
+    [[nodiscard]] bool isSolved() const {return toBeSolved == 0;}
 };
+
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 struct ACompanyWrapper
 {
     explicit ACompanyWrapper(ACompany company, function<bool(queue<AProblemPackWrapper*> &)> pred) :
@@ -85,21 +94,27 @@ struct ACompanyWrapper
     ACompany m_Company;
     AtomicQueue<AProblemPackWrapper*> m_Queue;
 };
+
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 struct SolvedPackCounter
 {
     explicit SolvedPackCounter(AProblemPackWrapper * mPack) : m_Pack(mPack) {}
     AProblemPackWrapper * m_Pack;
     size_t m_Counter = 0;
 };
+
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 struct Solver
 {
     explicit Solver(AProgtestSolver solver) : m_Solver(std::move(solver)) {}
     AProgtestSolver m_Solver;
     vector<SolvedPackCounter> m_solved;
 };
+
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 class COptimizer
 {
   public:
@@ -119,10 +134,8 @@ class COptimizer
 
     void initSolvers();
     void fillSolver(AProblemPackWrapper * pack);
+    void setNewSolver(SolverType type);
     void finalizeSolvers();
-
-    bool checkFullMinSolver();
-    bool checkFullCntSolver();
 
 private:
     vector<thread>  m_WorkThreads;
@@ -141,6 +154,7 @@ private:
     condition_variable m_ToSolveEmpty;
 };
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 void COptimizer::initSolvers()
 {
     m_CntSolver = new Solver(createProgtestCntSolver());
@@ -197,25 +211,20 @@ void COptimizer::problemSubmitter (ACompanyWrapper * company, int id)
 }
 
 
-bool COptimizer::checkFullMinSolver()
+void COptimizer::setNewSolver(SolverType type)
 {
-    if(!m_MinSolver->m_Solver->hasFreeCapacity()){
+    if(type == MIN){
         m_ToSolve.push(m_MinSolver);
-        m_MinSolver = new Solver(createProgtestMinSolver());
-        return false;
+        m_CntSolver = new Solver(createProgtestMinSolver());
     }
-    return true;
-}
-
-
-bool COptimizer::checkFullCntSolver()
-{
-    if(!m_CntSolver->m_Solver->hasFreeCapacity()){
+    else if (type == CNT){
         m_ToSolve.push(m_CntSolver);
         m_CntSolver = new Solver(createProgtestCntSolver());
-        return false;
     }
-    return true;
+    else{
+        if(!m_MinSolver->m_solved.empty()) m_ToSolve.push(m_MinSolver);
+        if(!m_CntSolver->m_solved.empty()) m_ToSolve.push(m_CntSolver);
+    }
 }
 
 
@@ -225,7 +234,10 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
     m_MinSolver->m_solved.emplace_back(pack);
 
     for(auto & p : pack->m_Pack->m_ProblemsMin){
-        if(!checkFullMinSolver()) m_MinSolver->m_solved.emplace_back(pack);
+        if(!m_MinSolver->m_Solver->hasFreeCapacity()){
+            setNewSolver(MIN);
+            m_MinSolver->m_solved.emplace_back(pack);
+        }
 
         m_MinSolver->m_Solver->addPolygon(p);
         m_MinSolver->m_solved.back().m_Counter++;
@@ -238,9 +250,12 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
 
     for(auto & p : pack->m_Pack->m_ProblemsCnt)
     {
-        if(!checkFullCntSolver()) m_CntSolver->m_solved.emplace_back(pack);
-        m_CntSolver->m_Solver->addPolygon(p);
-        m_CntSolver->m_solved.back().m_Counter++;
+        if(m_CntSolver->m_Solver->hasFreeCapacity()){
+            setNewSolver(CNT);
+            m_CntSolver->m_solved.emplace_back(pack);
+        }
+        m_MinSolver->m_Solver->addPolygon(p);
+        m_MinSolver->m_solved.back().m_Counter++;
     }
     g_MtxCntSolver.unlock();
 }
@@ -249,14 +264,11 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
 void COptimizer::finalizeSolvers()
 {
     g_MtxMinSolver.lock();
-    if(!m_MinSolver->m_solved.empty())
-        m_ToSolve.push(m_MinSolver);
+    if(!m_MinSolver->m_solved.empty()) m_ToSolve.push(m_MinSolver);
     g_MtxMinSolver.unlock();
 
-
     g_MtxCntSolver.lock();
-    if(!m_CntSolver->m_solved.empty())
-        m_ToSolve.push(m_CntSolver);
+    if(!m_CntSolver->m_solved.empty()) m_ToSolve.push(m_CntSolver);
     g_MtxCntSolver.unlock();
 }
 
@@ -280,11 +292,9 @@ void COptimizer::stop ()
     for(auto & th : m_Receivers) th.join();
     finalizeSolvers();
 
-    // suicide signal for workers
     for(size_t i = 0; i < m_WorkThreads.size(); ++i)
         m_ToSolve.push(nullptr);
 
-    // suicide signal for submitters
     for(auto & company : m_Companies)
         company.m_Queue.push(nullptr);
 
