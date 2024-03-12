@@ -41,7 +41,7 @@ using namespace std;
 #endif /* __PROGTEST__ */
 
 enum SolverType{
-    MIN, CNT
+    MIN, CNT, END
 };
 
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -213,17 +213,19 @@ void COptimizer::problemSubmitter (ACompanyWrapper * company, int id)
 
 void COptimizer::setNewSolver(SolverType type)
 {
-    if(type == MIN){
-        m_ToSolve.push(m_MinSolver);
-        m_CntSolver = new Solver(createProgtestMinSolver());
-    }
-    else if (type == CNT){
-        m_ToSolve.push(m_CntSolver);
-        m_CntSolver = new Solver(createProgtestCntSolver());
-    }
-    else{
-        if(!m_MinSolver->m_solved.empty()) m_ToSolve.push(m_MinSolver);
-        if(!m_CntSolver->m_solved.empty()) m_ToSolve.push(m_CntSolver);
+    switch (type){
+        case MIN:
+            m_ToSolve.push(m_MinSolver);
+            m_MinSolver = new Solver(createProgtestMinSolver());
+            break;
+        case CNT:
+            m_ToSolve.push(m_CntSolver);
+            m_CntSolver = new Solver(createProgtestCntSolver());
+            break;
+        case END:
+            if(!m_MinSolver->m_solved.empty()) m_ToSolve.push(m_MinSolver);
+            if(!m_CntSolver->m_solved.empty()) m_ToSolve.push(m_CntSolver);
+            break;
     }
 }
 
@@ -242,6 +244,7 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
         m_MinSolver->m_Solver->addPolygon(p);
         m_MinSolver->m_solved.back().m_Counter++;
     }
+    if(!m_MinSolver->m_Solver->hasFreeCapacity()) setNewSolver(MIN);
     g_MtxMinSolver.unlock();
 
 
@@ -250,13 +253,14 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
 
     for(auto & p : pack->m_Pack->m_ProblemsCnt)
     {
-        if(m_CntSolver->m_Solver->hasFreeCapacity()){
+        if(!m_CntSolver->m_Solver->hasFreeCapacity()){
             setNewSolver(CNT);
             m_CntSolver->m_solved.emplace_back(pack);
         }
-        m_MinSolver->m_Solver->addPolygon(p);
-        m_MinSolver->m_solved.back().m_Counter++;
+        m_CntSolver->m_Solver->addPolygon(p);
+        m_CntSolver->m_solved.back().m_Counter++;
     }
+    if(!m_CntSolver->m_Solver->hasFreeCapacity()) setNewSolver(CNT);
     g_MtxCntSolver.unlock();
 }
 
@@ -264,11 +268,9 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
 void COptimizer::finalizeSolvers()
 {
     g_MtxMinSolver.lock();
-    if(!m_MinSolver->m_solved.empty()) m_ToSolve.push(m_MinSolver);
-    g_MtxMinSolver.unlock();
-
     g_MtxCntSolver.lock();
-    if(!m_CntSolver->m_solved.empty()) m_ToSolve.push(m_CntSolver);
+    setNewSolver(END);
+    g_MtxMinSolver.unlock();
     g_MtxCntSolver.unlock();
 }
 
@@ -295,9 +297,6 @@ void COptimizer::stop ()
     for(size_t i = 0; i < m_WorkThreads.size(); ++i)
         m_ToSolve.push(nullptr);
 
-    for(auto & company : m_Companies)
-        company.m_Queue.push(nullptr);
-
     for(auto & th : m_WorkThreads) th.join();
     for(auto & th : m_Submitters) th.join();
 }
@@ -320,7 +319,7 @@ int main ()
 
   optimizer . addCompany ( company );
 
-  optimizer . start ( 5);
+  optimizer . start (10);
   optimizer . stop  ();
   if ( ! company -> allProcessed () )
     throw std::logic_error ( "(some) problems were not correctly processsed" );
