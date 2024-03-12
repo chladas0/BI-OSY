@@ -42,29 +42,40 @@ using namespace std;
 
 struct AProblemPackWrapper
 {
-    shared_ptr<CProblemPack> m_Pack;
-    size_t m_ProblemId, m_CompanyId;
-    bool m_Suicide = false;
-    size_t m_MinSize, m_CntSize;
+    AProblemPack m_Pack;
+    size_t m_CompanyId;
+    atomic<size_t> toBeSolved;
 
-    AProblemPackWrapper(shared_ptr<CProblemPack> pack, size_t problemId, size_t companyId, bool suicide = false)
-        : m_Pack(std::move(pack)), m_ProblemId(problemId), m_CompanyId(companyId), m_Suicide(suicide),
-        m_MinSize(m_Pack ? m_Pack->m_ProblemsMin.size() : 0 ), m_CntSize(m_Pack ? m_Pack->m_ProblemsCnt.size() : 0)
-    {}
-    bool isSolved() const {return m_MinSize == 0 && m_CntSize == 0;}
+    AProblemPackWrapper(AProblemPack pack, size_t companyId)
+        : m_Pack(std::move(pack)), m_CompanyId(companyId), toBeSolved(m_Pack->m_ProblemsMin.size() + m_Pack->m_ProblemsCnt.size()){}
+
+    [[nodiscard]] bool isSolved() const {return toBeSolved == 0;}
 };
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
 struct ACompanyWrapper
 {
-    explicit ACompanyWrapper(ACompany comp) : company(std::move(comp)) {}
-    ACompanyWrapper(const ACompanyWrapper &comp) : company(comp.company), problems(comp.problems){}
+    explicit ACompanyWrapper(ACompany company) :
+    m_Company(std::move(company)), g_QueueMtx(make_shared<mutex>()), m_EmptyQueue(make_shared<condition_variable>()) {}
+    ACompany m_Company;
+    shared_ptr<mutex> g_QueueMtx;
+    queue<AProblemPackWrapper*> m_Queue;
+    shared_ptr<condition_variable> m_EmptyQueue;
+};
+//-------------------------------------------------------------------------------------------------------------------------------------------------------------
+struct SolvedPackCounter
+{
+    explicit SolvedPackCounter(AProblemPackWrapper * mPack) : m_Pack(mPack) {}
+    AProblemPackWrapper * m_Pack;
+    size_t m_Counter = 0;
 
-    mutex m_CompanyMutex;
-    condition_variable submitNotReady;
-    ACompany company;
-    unordered_map<int, AProblemPackWrapper> problems;
-    size_t id = 0;
-    size_t lastId = 0;
+    ~SolvedPackCounter(){}
+};
+//-------------------------------------------------------------------------------------------------------------------------------------------------------------
+struct Solver
+{
+    explicit Solver(AProgtestSolver solver) : m_Solver(std::move(solver)) {}
+    AProgtestSolver m_Solver;
+    vector<SolvedPackCounter> m_solved;
 };
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
 class COptimizer
@@ -79,14 +90,15 @@ class COptimizer
     void addCompany (ACompany company);
 
     void workThread (int threadId);
-    void problemReceiver (int companyId);
-    void problemSubmitter (int companyId);
+    void problemReceiver (ACompanyWrapper * company, int id);
+    void problemSubmitter (ACompanyWrapper * company, int id);
+    void initSolvers();
 
-    void addToSolve(const AProblemPackWrapper& pack);
-    void solveOneCnt(const APolygon& polygon);
-    void solveOneMin(const APolygon& polygon);
-    void initSolver(){m_MinSolvers.emplace_back(createProgtestMinSolver()),
-                      m_CntSolvers.emplace_back(createProgtestCntSolver());}
+    void fillSolver(AProblemPackWrapper * pack);
+    void finilizeSolvers();
+
+    bool checkFullMinSolver();
+    bool checkFullCntSolver();
 
 private:
     vector<thread>  m_WorkThreads;
@@ -94,237 +106,208 @@ private:
     vector<thread>  m_Submitters;
 
     vector<ACompanyWrapper> m_Companies;
-    list<AProblemPackWrapper> m_toReview;
 
-    size_t m_LiveWorkers;
-    size_t m_LiveReceivers;
+    queue<Solver*> m_ToSolve;
 
-    queue<AProblemPackWrapper> m_ToSolve;
+    Solver * m_CntSolver;
+    Solver * m_MinSolver;
+
+    atomic<size_t> m_LiveReceivers;
 
     mutex g_MtxToSolve;
-    mutex g_MtxLiveReceivers;
-    mutex g_MtxLiveWorkers;
-    mutex g_MinSolver;
-    mutex g_CntSolver;
-    mutex g_ToReview;
+    mutex g_MtxMinSolver;
+    mutex g_MtxCntSolver;
 
-    condition_variable allReceived;
-    condition_variable workersEmpty;
-    condition_variable toSolveEmpty;
-    condition_variable toSubmitEmpty;
+    binary_semaphore m_ReceiversDone{0};
 
-    // solver stuff
-    size_t cntIdx = 0;
-    size_t minIdx = 0;
-    vector<AProgtestSolver> m_MinSolvers;
-    vector<AProgtestSolver> m_CntSolvers;
+    condition_variable m_ToSolveEmpty;
 };
 
-
-// Solving -------------------------------------------------------------------------------------------------------------
-void COptimizer::addToSolve(const AProblemPackWrapper& pack)
+void COptimizer::initSolvers()
 {
-    g_ToReview.lock();
-    m_toReview.emplace_back(pack);
-    g_ToReview.unlock();
-
-    for(auto & i : pack.m_Pack->m_ProblemsMin) solveOneMin(i);
-
-}
-
-void COptimizer::solveOneCnt(const APolygon& polygon)
-{
-}
-
-void COptimizer::solveOneMin(const APolygon& polygon)
-{
-    if(!m_MinSolvers[minIdx]->addPolygon(polygon))
-    {
-        m_MinSolvers.emplace_back(createProgtestMinSolver());
-        minIdx++;
-        m_MinSolvers[minIdx]->addPolygon(polygon);
-
-        size_t solved = m_MinSolvers[minIdx-1]->solve();
-
-        g_ToReview.lock();
-        for(auto it = m_toReview.begin(); it != m_toReview.end(); )
-        {
-            if(solved == 0) break;
-
-            if(solved >= it->m_MinSize)
-            {
-                solved -= it->m_MinSize;
-                it->m_MinSize = 0;
-            }
-
-            else{
-                it->m_MinSize -= solved;
-                solved = 0;
-            }
-
-            // notify the submit thread
-            if(it->m_MinSize == 0){
-
-                for(auto & x : it->m_Pack->m_ProblemsMin)
-                    printf("res: %f\n", x->m_TriangMin);
-
-                it = m_toReview.erase(it);
-            }
-            else it++;
-        }
-        g_ToReview.unlock();
-    }
+    m_CntSolver = new Solver(createProgtestCntSolver());
+    m_MinSolver = new Solver(createProgtestMinSolver());
 }
 
 
-
-
-
-// ---------------------------------------------------------------------------------------------------------------------
 void COptimizer::workThread (int threadId)
 {
     while(true)
     {
-        unique_lock<mutex> toSolveLock(g_MtxToSolve);
+        unique_lock<mutex> workReady(g_MtxToSolve);
+        m_ToSolveEmpty.wait(workReady, [this] () {return !m_ToSolve.empty();});
 
-        toSolveEmpty.wait(toSolveLock, [this]{return !m_ToSolve.empty();});
+        auto solver = m_ToSolve.front(); m_ToSolve.pop();
+        workReady.unlock();
 
-        auto pack = m_ToSolve.front();
-        m_ToSolve.pop();
+        if(!solver) break;
 
-        if(pack.m_Suicide) break;
+        solver->m_Solver->solve();
+        for(auto & solved : solver->m_solved)
+        {
+            solved.m_Pack->toBeSolved -= solved.m_Counter;
 
-        addToSolve(pack);
+            if(!solved.m_Pack->toBeSolved){
+                auto id = solved.m_Pack->m_CompanyId;
+                m_Companies[id].m_EmptyQueue->notify_one();
+            }
+        }
+        delete solver;
+    }
+}
+
+void COptimizer::problemReceiver (ACompanyWrapper * company, int id)
+{
+    while(true)
+    {
+        auto pack = company->m_Company->waitForPack();
+        auto packWrap = pack ? new AProblemPackWrapper(pack, id) : nullptr;
+
+        company->g_QueueMtx->lock();
+        company->m_Queue.emplace(packWrap);
+        company->m_EmptyQueue->notify_one();
+        company->g_QueueMtx->unlock();
+
+        if(!pack) break;
+        fillSolver(packWrap);
     }
 
-    g_MtxLiveWorkers.lock();
-
-    m_LiveWorkers--;
-    if(m_LiveWorkers == 0)
-        workersEmpty.notify_all();
-
-    g_MtxLiveWorkers.unlock();
+    m_LiveReceivers--;
+    if(!m_LiveReceivers) m_ReceiversDone.release();
 }
 
-void COptimizer::problemReceiver (int companyId)
+void COptimizer::problemSubmitter (ACompanyWrapper * company, int id)
 {
-  size_t id = 0;
+    while(true)
+    {
+        unique_lock<mutex> queueLock (*company->g_QueueMtx);
+        company->m_EmptyQueue->wait(queueLock,
+                                    [&] () {return !company->m_Queue.empty() && (company->m_Queue.front() == nullptr ||
+                                            company->m_Queue.front()->isSolved());});
 
-  while(true)
-  {
-    auto pack = m_Companies[companyId].company->waitForPack();
+        auto solved = company->m_Queue.front(); company->m_Queue.pop();
+        queueLock.unlock();
 
-    if(pack == nullptr) break;
+        if(!solved) break;
+        company->m_Company->solvedPack(solved->m_Pack);
 
-    AProblemPackWrapper x(pack, id, companyId);
-
-    // debug maybe not :D HIHIHI
-    for(auto & a : pack->m_ProblemsCnt)
-        a->m_TriangMin = -1000000;
-
-    // Emplace the pack to be solved
-    g_MtxToSolve.lock();
-    m_ToSolve.emplace(x);
-    toSolveEmpty.notify_all();
-    g_MtxToSolve.unlock();
-
-    // Add it to the solved problems
-    m_Companies[companyId].m_CompanyMutex.lock();
-    m_Companies[companyId].problems.emplace(id, x);
-    m_Companies[companyId].lastId = id + 1;
-    m_Companies[companyId].m_CompanyMutex.unlock();
-    id++;
-  }
-
-  // update the live receivers
-  g_MtxLiveReceivers.lock();
-
-  m_LiveReceivers--;
-  if(m_LiveReceivers == 0)
-        allReceived.notify_all();
-
-  g_MtxLiveReceivers.unlock();
+        delete solved;
+    }
+    printf("Submitter ended\n");
 }
 
-void COptimizer::problemSubmitter (int companyId)
+bool COptimizer::checkFullMinSolver()
 {
-//    int id = 0;
-//    while(true)
-//    {
-//        unique_lock<mutex> ul(m_Companies[companyId].m_CompanyMutex);
-//        m_Companies[companyId].submitNotReady.wait(ul,
-//                                                   [this, companyId, id] {return
-//                                                   m_Companies[companyId].problems.count(id) &&
-//                                                   m_Companies[companyId].problems[id].isSolved();});
-//
-//        auto pack = m_Companies[companyId].problems[id];
-//
-//        if(pack.m_Suicide) break;
-//
-//        printf("Company %d, solved problem %ld\n", companyId, pack.m_ProblemId);
-//
-////        for(auto & x : pack.m_Pack->m_ProblemsCnt)
-////            printf("res: %f\n", x->m_TriangMin);
-//
-////        m_Companies[companyId].company->solvedPack(pack.m_Pack);
-////        m_Companies[companyId].problems.erase(m_Companies[companyId].problems.begin());
-//        id++;
-//    }
+    if(!m_MinSolver->m_Solver->hasFreeCapacity()){
+        g_MtxToSolve.lock();
+        m_ToSolve.emplace(m_MinSolver);
+        m_MinSolver = new Solver(createProgtestMinSolver());
+        g_MtxToSolve.unlock();
+        return false;
+    }
+    return true;
 }
+
+bool COptimizer::checkFullCntSolver()
+{
+    if(!m_CntSolver->m_Solver->hasFreeCapacity()){
+        g_MtxToSolve.lock();
+        m_ToSolve.emplace(m_CntSolver);
+        m_CntSolver = new Solver(createProgtestCntSolver());
+        g_MtxToSolve.unlock();
+        return false;
+    }
+    return true;
+}
+
+void COptimizer::fillSolver(AProblemPackWrapper * pack)
+{
+    g_MtxMinSolver.lock();
+    m_MinSolver->m_solved.emplace_back(pack);
+
+    for(auto & p : pack->m_Pack->m_ProblemsMin){
+        if(!checkFullMinSolver()) m_MinSolver->m_solved.emplace_back(pack);
+
+        m_MinSolver->m_Solver->addPolygon(p);
+        m_MinSolver->m_solved.back().m_Counter++;
+    }
+    g_MtxMinSolver.unlock();
+
+
+    g_MtxCntSolver.lock();
+    m_CntSolver->m_solved.emplace_back(pack);
+
+    for(auto & p : pack->m_Pack->m_ProblemsCnt)
+    {
+        if(!checkFullCntSolver()) m_CntSolver->m_solved.emplace_back(pack);
+        m_CntSolver->m_Solver->addPolygon(p);
+        m_CntSolver->m_solved.back().m_Counter++;
+    }
+    g_MtxCntSolver.unlock();
+}
+
+void COptimizer::finilizeSolvers()
+{
+    g_MtxMinSolver.lock();
+    if(!m_MinSolver->m_solved.empty())
+    {
+        g_MtxToSolve.lock();
+        m_ToSolve.emplace(m_MinSolver);
+        m_MinSolver = nullptr;
+        g_MtxToSolve.unlock();
+    }
+    g_MtxMinSolver.unlock();
+
+
+    g_MtxCntSolver.lock();
+    if(!m_CntSolver->m_solved.empty())
+    {
+        g_MtxToSolve.lock();
+        m_ToSolve.emplace(m_CntSolver);
+        m_CntSolver = nullptr;
+        g_MtxToSolve.unlock();
+    }
+    g_MtxCntSolver.unlock();
+}
+
 
 
 void COptimizer::start ( int threadCount )
 {
-    initSolver();
-    m_LiveWorkers = threadCount;
+    initSolvers();
     m_LiveReceivers = m_Companies.size();
 
-    for(int i = 0; i < (int)m_Companies.size(); i++){
-        m_Receivers.emplace_back(&COptimizer::problemReceiver, this, i);
-        m_Submitters.emplace_back(&COptimizer::problemSubmitter, this, i);
+    for(size_t i = 0; i < m_Companies.size(); ++i){
+        m_Receivers.emplace_back(&COptimizer::problemReceiver, this, &m_Companies[i], i);
+        m_Submitters.emplace_back(&COptimizer::problemSubmitter, this, &m_Companies[i], i);
     }
 
-    for (int i = 0; i < threadCount; i++)
+    for (int i = 0; i < threadCount; ++i)
         m_WorkThreads.emplace_back(&COptimizer::workThread, this, i);
 }
 
 void COptimizer::stop ()
 {
-    unique_lock<mutex> ul(g_MtxLiveReceivers);
+    m_ReceiversDone.acquire();
+    size_t live_workers = m_WorkThreads.size();
 
-    // wait for Companies to finish
-    while(m_LiveReceivers > 0)
-        allReceived.wait(ul);
-    ul.unlock();
+    finilizeSolvers();
 
-    // send suicide signal to all workers
-
-    unique_lock<mutex> ul2(g_MtxLiveWorkers);
-    int workers = (int)m_LiveWorkers;
-    ul2.unlock();
-
-    for(int i = 0; i < workers; i++){
+    // suicide signal for workers
+    for(size_t i = 0; i < live_workers; ++i){
         g_MtxToSolve.lock();
-        m_ToSolve.emplace(nullptr, 0, 0, true);
-        toSolveEmpty.notify_all();
+        m_ToSolve.emplace(nullptr);
+        m_ToSolveEmpty.notify_all();
         g_MtxToSolve.unlock();
     }
 
-//    unique_lock<mutex> ul3(g_MtxLiveWorkers);
-//    while(m_LiveWorkers > 0)
-//        workersEmpty.wait(ul3);
-//    ul3.unlock();
-//
-//    int submitters = (int)m_Submitters.size();
-//
-//    for(int i = 0; i < submitters; i++)
-//    {
-//        m_Companies[i].m_CompanyMutex.lock();
-//        size_t lastId = m_Companies[i].lastId;
-//        m_Companies[i].problems.emplace(lastId, AProblemPackWrapper(nullptr, 0, 0, true));
-//        m_Companies[i].submitNotReady.notify_one();
-//        m_Companies[i].m_CompanyMutex.unlock();
-//    }
+    // suicide signal for submitters
+    for(auto company : m_Companies){
+        company.g_QueueMtx->lock();
+        company.m_Queue.emplace(nullptr);
+        company.m_EmptyQueue->notify_one();
+        company.g_QueueMtx->unlock();
+    }
 
     for(auto & th : m_Receivers) th.join();
     for(auto & th : m_WorkThreads) th.join();
@@ -335,9 +318,6 @@ void COptimizer::addCompany ( ACompany company )
 {
     m_Companies.emplace_back(std::move(company));
 }
-
-
-// TODO: COptimizer implementation goes here
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
 #ifndef __PROGTEST__
 int main ()
@@ -347,10 +327,10 @@ int main ()
 
   optimizer . addCompany ( company );
 
-  optimizer . start ( 30 );
+  optimizer . start ( 1 );
   optimizer . stop  ();
-//  if ( ! company -> allProcessed () )
-//    throw std::logic_error ( "(some) problems were not correctly processsed" );
+  if ( ! company -> allProcessed () )
+    throw std::logic_error ( "(some) problems were not correctly processsed" );
   return 0;
 }
 #endif /* __PROGTEST__ */
