@@ -150,8 +150,6 @@ private:
 
     mutex g_MtxMinSolver;
     mutex g_MtxCntSolver;
-
-    condition_variable m_ToSolveEmpty;
 };
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -267,11 +265,8 @@ void COptimizer::fillSolver(AProblemPackWrapper * pack)
 
 void COptimizer::finalizeSolvers()
 {
-    g_MtxMinSolver.lock();
-    g_MtxCntSolver.lock();
+    unique_lock<mutex> minLock (g_MtxMinSolver), cntLock (g_MtxCntSolver);
     setNewSolver(END);
-    g_MtxMinSolver.unlock();
-    g_MtxCntSolver.unlock();
 }
 
 
@@ -293,10 +288,7 @@ void COptimizer::stop ()
 {
     for(auto & th : m_Receivers) th.join();
     finalizeSolvers();
-
-    for(size_t i = 0; i < m_WorkThreads.size(); ++i)
-        m_ToSolve.push(nullptr);
-
+    for(size_t i = 0; i < m_WorkThreads.size(); ++i) m_ToSolve.push(nullptr);
     for(auto & th : m_WorkThreads) th.join();
     for(auto & th : m_Submitters) th.join();
 }
@@ -307,7 +299,7 @@ void COptimizer::addCompany ( ACompany company )
     std::function<bool(queue<AProblemPackWrapper*> & q)> isFirstSolved =
             [] (queue<AProblemPackWrapper*> & q) {return !q.front() || !q.front()->toBeSolved;};
 
-    m_Companies.emplace_back(company, isFirstSolved);
+    m_Companies.emplace_back(std::move(company), isFirstSolved);
 }
 
 //-------------------------------------------------------------------------------------------------------------------------------------------------------------
