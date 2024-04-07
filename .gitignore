@@ -1,5 +1,12 @@
-hw1/sample/vgcore*
-hw2/sample/.idea/
+hw*/vgcore*
+hw*/cmake-build-debug
+hw*/CMakeLists.txt
+hw*/.idea/
+
+
+
+
+
 
 # Prerequisites
 *.d
