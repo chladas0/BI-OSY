@@ -15,6 +15,8 @@
  * again, this is only a starting point.
  */
 
+#include <iostream>
+using namespace std;
 
 constexpr int                          RAID_DEVICES = 4;
 constexpr int                          DISK_SECTORS = 8192;
@@ -152,33 +154,266 @@ void                                   test1                                   (
 
     CRaidVolume vol;
 
+    // Adhoc testing
+
+    cout << vol.start(dev) << endl;
+
     assert ( vol . start ( dev ) == RAID_OK );
     assert ( vol . status () == RAID_OK );
-//
-//    /* your raid device shall be up.
-//     * try to read and write all RAID sectors:
-//     */
-//
-//    for ( int i = 0; i < vol . size (); i ++ )
-//    {
-//        char buffer [SECTOR_SIZE];
-//
-//        assert ( vol . read ( i, buffer, 1 ) );
-//        assert ( vol . write ( i, buffer, 1 ) );
-//    }
-//
-//    /* Extensive testing of your RAID implementation ...
-//     */
-//
-//
-//    /* Stop the raid device ...
-//     */
-//    assert ( vol . stop () == RAID_STOPPED );
-//    assert ( vol . status () == RAID_STOPPED );
-//
-//    /* ... and the underlying disks.
-//     */
 
+    int i, retCode;
+
+    for ( i = 0; i < vol.size () -1; i ++ )
+    {
+        char buffer [SECTOR_SIZE];
+        memset(buffer,0,sizeof(buffer));
+        sprintf(buffer, "%d", i);
+
+        if(i == 24571)
+        {
+            for(int a = 0; a < SECTOR_SIZE; a++)
+                cout << buffer[a] << " ";
+            cout << endl;
+        }
+
+        retCode = vol.write ( i, buffer, 1 );
+    }
+
+    if(vol.status() != RAID_OK) printf("Error, write");
+    char buf[SECTOR_SIZE];
+
+    retCode = vol.read(24571, buf, 1);
+
+    if(retCode > 0)
+    {
+        int a = atoi(buf);
+        if(a == 24571) printf("YES\n");
+        else
+            printf("ERROR write or read, a is : %d:%s", a,buf);
+    }
+    else printf("Error Read\n");
+
+    //testing write and read
+    for ( i = 0; i < vol.size(); i ++ )
+    {
+        char buffer [SECTOR_SIZE];
+        retCode = vol.read( i, buffer, 1 );
+        retCode = vol.write( i, buffer, 1 );
+    }
+    if(vol.status() != RAID_OK) printf("Error, write");
+    memset(buf, 0, sizeof(buf));
+
+    retCode = vol.read(24571, buf, 1);
+
+    if(retCode > 0)
+    {
+        int a = atoi(buf);
+        if(a == 24571) printf("YES\n");
+        else
+            printf("ERROR write or read, a is : %d:%s", a,buf);
+    }
+    else printf("Error Read\n");
+
+    diskWrite(2, 0, "Killed", 1);
+    int status = vol.status();
+    retCode = RaidRead(24571, buf, 1);
+    if(retCode > 0)
+    {
+        int a = atoi(buf);
+        if(a == 24571) printf("YES\n");
+        else
+            printf("ERROR write or read, a is : %d:%s", a,buf);
+    }
+    else printf("Error Read\n");
+    retCode = RaidResync();
+
+    // Adhoc testing
+    /*
+    char buffer [SECTOR_SIZE];
+    memset ( buffer, 0, sizeof ( buffer ) );
+
+    int XOR = 0;
+    char Data [] = {8, 16 , 32};
+
+    for ( int i = 0; i < dev . m_Devices; i ++ )
+    {
+        if(i != dev.m_Devices - 1){
+            buffer[0] = Data[i];
+            XOR ^= buffer[0];
+        }
+        else
+            buffer[0] = XOR;
+
+        assert ( dev . m_Write ( i, 0, buffer, 1 ) == 1 );
+    }
+
+    // show the data writen
+    for ( int i = 0; i < dev . m_Devices; i ++ )
+    {
+        assert ( dev . m_Read ( i, 0, buffer, 1 ) == 1 );
+        for ( int j = 0; j < 10; j ++ )
+            printf("%d ", buffer[j]);
+        printf("\n");
+    }
+
+    printf("---------------------------\n");
+
+    // damage the data on disk 1
+    buffer[0] = 42;
+    assert ( dev . m_Write ( 1, 0, buffer, 1 ) == 1 );
+    vol.setDegradedTesting(1);
+
+    // show the data writen
+    for ( int i = 0; i < dev . m_Devices; i ++ )
+    {
+        assert ( dev . m_Read ( i, 0, buffer, 1 ) == 1 );
+        for ( int j = 0; j < 10; j ++ )
+            printf("%d ", buffer[j]);
+        printf("\n");
+    }
+
+    auto state = vol.resync();
+
+    printf("---------------------------\n");
+
+    printf("State after resync: ");
+
+    switch (state)
+    {
+        case RAID_OK:
+            printf("RAID_OK\n");
+            break;
+        case RAID_DEGRADED:
+            printf("RAID_DEGRADED\n");
+            break;
+        case RAID_FAILED:
+            printf("RAID_FAILED\n");
+            break;
+        case RAID_STOPPED:
+            printf("RAID_STOPPED\n");
+            break;
+    }
+
+    // show the data writen
+    for ( int i = 0; i < dev . m_Devices; i ++ )
+    {
+        assert ( dev . m_Read ( i, 0, buffer, 1 ) == 1 );
+        for ( int j = 0; j < 10; j ++ )
+            printf("%d ", buffer[j]);
+        printf("\n");
+    }
+
+    printf("---------------------------\n");
+
+    for(int i = 0; i < 13; i++)
+    {
+        int secNr = i;
+        int dataDisk, parityDisk, sector;
+
+        vol.findDiskAndStripe(secNr, dataDisk, parityDisk, sector);
+
+        printf("Searching for Sector: %d\n", secNr);
+        printf("Data disk: %d\n", dataDisk);
+        printf("Parity disk: %d\n", parityDisk);
+        printf("Index on disk: %d\n", sector);
+        printf("---------------------------\n");
+    }
+
+    // Testing readDataOK
+
+    for(int i = 0; i < 3; i++){
+        vol.read(i, buffer, 1);
+        printf("Data at sector %d: %d\n", i, buffer[0]);
+    }
+
+    memset(buffer, 0, sizeof(buffer));
+    vol.setDegradedTesting(2);
+
+    printf("Testing normal RAID\n");
+    for(int i = 0; i < 4; i++)
+    {
+        memset(buffer, i, sizeof(buffer));
+        vol.write(i, buffer, 1);
+    }
+
+    for(int i = 0; i < 4; i++)
+    {
+        vol.read(i, buffer, 1);
+
+        for(int j = 0; j < 5; j++)
+            printf("%d ", buffer[j]);
+
+        printf("\n");
+    }
+
+    // damage the data on disk 2
+    printf("Damaging disk 2\n");
+    for(int i = 0; i < SECTOR_SIZE; i++)
+        buffer[i] = i;
+
+    assert ( dev . m_Write ( 2, 0, buffer, 1 ) == 1 );
+
+    printf("---------------------------\n");
+    printf("Testing degraded RAID\n");
+
+    for(int i = 0; i < 4; i++)
+    {
+        vol.read(i, buffer, 1);
+
+        for(int j = 0; j < 5; j++)
+            printf("%d ", buffer[j]);
+
+        printf("\n");
+    }
+
+    printf("---------------------------\n");
+    printf("RAW data stored on first 4 sectors \n");
+    for(int i = 0; i < 4; i++)
+    {
+        dev.m_Read(i, 0, buffer, 1);
+
+        for(int j = 0; j < 5; j++)
+            printf("%d ", buffer[j]);
+
+        printf("\n");
+    }
+
+    printf("---------------------------\n");
+    printf("Resyncing RAID\n");
+    vol.resync();
+
+
+    printf("RAW data stored on first 4 sectors after Resync\n");
+    for(int i = 0; i < 4; i++)
+    {
+        dev.m_Read(i, 0, buffer, 1);
+
+        for(int j = 0; j < 5; j++)
+            printf("%d ", buffer[j]);
+
+        printf("\n");
+    }
+
+     Lada testing :D
+    for ( int i = 0; i < vol . size (); i ++ )
+    {
+        char buffer [SECTOR_SIZE];
+
+        assert ( vol . read ( i, buffer, 1 ) );
+        assert ( vol . write ( i, buffer, 1 ) );
+    }
+    */
+
+
+    // Test writing OK
+
+
+
+
+    /* Stop the raid device ... */
+    assert ( vol . stop () == RAID_STOPPED );
+    assert ( vol . status () == RAID_STOPPED );
+    /* ... and the underlying disks. */
     doneDisks ();
 }
 //-------------------------------------------------------------------------------------------------
@@ -197,12 +432,19 @@ void                                   test2                                   (
     assert ( vol . start ( dev ) == RAID_OK );
 
 
-    /* some I/O: RaidRead/RaidWrite
+    /* some I/O: vol.read/vol.write
      */
 
     vol . stop ();
     doneDisks ();
 }
+
+void test3()
+{
+
+}
+
+
 //-------------------------------------------------------------------------------------------------
 int                                    main                                    ()
 {
@@ -210,3 +452,6 @@ int                                    main                                    (
 //    test2 ();
     return EXIT_SUCCESS;
 }
+
+//
+
