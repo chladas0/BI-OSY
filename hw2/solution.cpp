@@ -45,20 +45,14 @@ public:
     int                                status             () const;
     int                                size               () const;
 
-    void                               setDegradedTesting (int failedDisk );
+private:
     void                               findDiskAndStripe  (int secNr, int & diskForData, int & diskForParity,
                                                            int & stripe) const;
-
-
-private:
     bool                               readAndUpdate      (int disk, int secNr, void * data, int secCnt);
     bool                               writeAndUpdate     (int disk, int secNr, const void * data, int secCnt);
 
-    bool                               readDataOK         (int & sector, char * & data, int secEnd);
-    bool                               readDataDegraded   (int sector, char * data, int secEnd);
-
-    bool                               writeDataOK        (int & sector, const char * & data, int secEnd);
-    bool                               writeDataDegraded  (int sector, const char * data, int secEnd);
+    bool                               readData         (int & sector, char * & data, int secEnd);
+    bool                               writeData  (int & sector, const char * & data, int secEnd);
 
     void                               buffersClear       ();
 
@@ -74,9 +68,6 @@ private:
     unsigned char                     m_OldData[SECTOR_SIZE];
 };
 
-
-
-
 bool CRaidVolume::read ( int secNr, void * dataVoid, int secCnt )
 {
     char * data = (char*)dataVoid;
@@ -85,11 +76,11 @@ bool CRaidVolume::read ( int secNr, void * dataVoid, int secCnt )
     switch (m_Status)
     {
         case RAID_OK:
-            if(readDataOK(secNr, data, endSec))
+            if(readData(secNr, data, endSec))
                 return true;
 
         case RAID_DEGRADED:
-            if(readDataDegraded(secNr, data, endSec))
+            if(readData(secNr, data, endSec))
                 return true;
 
         default:
@@ -106,11 +97,11 @@ bool CRaidVolume::write ( int secNr, const void * dataVoid, int secCnt )
     switch (m_Status)
     {
         case RAID_OK:
-            if (writeDataOK(secNr, data, endSec))
+            if (writeData(secNr, data, endSec))
                 return true;
 
         case RAID_DEGRADED:
-            if(writeDataDegraded(secNr, data, endSec))
+            if(writeData(secNr, data, endSec))
                 return true;
 
         default:
@@ -119,25 +110,7 @@ bool CRaidVolume::write ( int secNr, const void * dataVoid, int secCnt )
 }
 
 
-bool CRaidVolume::readDataOK(int & sector, char * & data, int secEnd)
-{
-    int diskForData, diskForParity, stripe;
-
-    for(; sector < secEnd; sector++)
-    {
-        findDiskAndStripe(sector, diskForData, diskForParity, stripe);
-
-        if(!readAndUpdate(diskForData, stripe, data, 1))
-            return false;
-
-        data += SECTOR_SIZE;
-    }
-
-    return true;
-}
-
-
-bool CRaidVolume::readDataDegraded(int sector, char * data, int secEnd)
+bool CRaidVolume::readData(int & sector, char * & data, int secEnd)
 {
     int diskForData, diskForParity, stripe;
 
@@ -174,7 +147,7 @@ bool CRaidVolume::readDataDegraded(int sector, char * data, int secEnd)
 }
 
 
-bool CRaidVolume::writeDataDegraded(int sector, const char * data, int secEnd)
+bool CRaidVolume::writeData(int & sector, const char * & data, int secEnd)
 {
     int diskForData, diskForParity, stripe;
 
@@ -238,35 +211,6 @@ bool CRaidVolume::writeDataDegraded(int sector, const char * data, int secEnd)
     return true;
 }
 
-
-bool CRaidVolume::writeDataOK(int & sector, const char * & data, int secEnd)
-{
-    int diskForData, diskForParity, stripe;
-
-    for(; sector < secEnd; sector++)
-    {
-        findDiskAndStripe(sector, diskForData, diskForParity, stripe);
-        buffersClear();
-
-        // Read the old data, overwrite with new data
-        if(!readAndUpdate(diskForData, stripe, m_OldData, 1) || !writeAndUpdate(diskForData, stripe, data, 1) ||
-           !readAndUpdate(diskForParity, stripe, m_Buffer, 1))
-            return false;
-
-        // Update the parity
-        for(int j = 0; j < SECTOR_SIZE; j++)
-            m_Buffer[j] = m_Buffer[j] ^ m_OldData[j] ^ data[j];
-
-        // Write the parity
-        if(!writeAndUpdate(diskForParity, stripe, m_Buffer, 1))
-            return false;
-
-        data += SECTOR_SIZE;
-    }
-    return true;
-}
-
-
 void CRaidVolume::findDiskAndStripe(int secNr, int & diskForData, int & diskForParity, int & stripe) const
 {
     stripe = secNr / (m_Dev.m_Devices - 1);
@@ -302,12 +246,8 @@ int CRaidVolume::writeTimeStamp(const TBlkDev & dev, int time, int failedDevice)
     int failedWrites = 0;
 
     for(int i = 0; i < dev.m_Devices; i++)
-    {
-        if(i == failedDevice) continue;
-
-        if(dev.m_Write(i, dev.m_Sectors - 1, buffer, 1) != 1)
+        if( i != failedDevice && dev.m_Write(i, dev.m_Sectors - 1, buffer, 1) != 1)
             failedWrites++;
-    }
 
     return failedWrites;    
 }
@@ -334,7 +274,6 @@ int CRaidVolume::start ( const TBlkDev & dev )
     if(m_Status == RAID_FAILED)
         return m_Status;
 
-
     m_Time = TimeStamps[0];
 
     // If we are in degraded state, then if all are the same we are just degraded, otherwise failed
@@ -345,7 +284,6 @@ int CRaidVolume::start ( const TBlkDev & dev )
         else
             return m_Status = RAID_FAILED;
     }
-
 
     // We are in OK state
     int FirstDifferent = m_Time, SecondDifferent = -1;
@@ -462,14 +400,6 @@ int CRaidVolume::status () const
 {
     return m_Status;
 }
-
-
-void CRaidVolume::setDegradedTesting(int failedDisk)
-{
-    m_FailedDev = failedDisk;
-    m_Status = RAID_DEGRADED;
-}
-
 
 // the last sector on each disk is reserved for timestamp data, and space of one disk is reserved for parity
 int CRaidVolume::size () const
