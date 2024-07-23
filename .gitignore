@@ -40,3 +40,8 @@ hw*/.idea/
 *.exe
 *.out
 *.app
+
+*.xopp
+*.pdf
+
+Notes/
